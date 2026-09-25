@@ -1,0 +1,27 @@
+name = "encurtador"
+main = "src/index.ts"
+compatibility_date = "2025-09-25"
+
+[[kv_namespaces]]
+binding = "URLS"
+id = "a37a1ce3b3d94545a21e18f80ba105f2"
+
+[[durable_objects.bindings]]
+name = "CLICK_COUNTER"
+class_name = "ClickCounter"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ClickCounter"]
+
+[vars]
+# Opcional: domínio público usado na resposta de short_url (ex.: https://encurtador.seudominio.dev)
+# Se vazio, usa a URL do próprio Worker (request.url)
+PUBLIC_BASE_URL = ""
+
+[observability]
+enabled = true
+
+[observability.logs]
+invocation_logs = true
+head_sampling_rate = 1
