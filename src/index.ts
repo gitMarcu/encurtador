@@ -3,8 +3,10 @@ import { log } from "./log";
 import type { Env } from "./types";
 import {
   createShortUrl,
+  createPublicShortUrl,
   deleteUrl,
   getUrl,
+  getClicks,
   listUrls,
   redirect,
 } from "./urls";
@@ -29,6 +31,23 @@ export default {
     }
 
     try {
+      if (path === "/public/shorten") {
+        if (method !== "POST") return jsonError("Método não permitido", 405);
+        return await createPublicShortUrl(request, env);
+      }
+      if ((method === "GET" || method === "HEAD") &&
+          (path === "/" && !request.headers.get("Accept")?.includes("application/json") ||
+           path.startsWith("/_next/") || path === "/favicon.svg")) {
+        const assetUrl = new URL(request.url);
+        if (path === "/") assetUrl.pathname = "/index.html";
+        const response = await env.ASSETS.fetch(new Request(assetUrl, request));
+        const headers = new Headers(response.headers);
+        headers.set("X-Content-Type-Options", "nosniff");
+        headers.set("X-Frame-Options", "DENY");
+        headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
+        headers.set("Content-Security-Policy", "frame-ancestors 'none'; base-uri 'self'; object-src 'none'");
+        return new Response(response.body, { status: response.status, headers });
+      }
       if (method === "GET" && path === "/health") {
         return withCors(json({ status: "ok" }));
       }
@@ -51,7 +70,7 @@ export default {
         return withCors(await listUrls(env));
       }
 
-      const urlMatch = path.match(/^\/urls\/([^/]+)$/);
+      const urlMatch = path.match(/^\/urls\/([a-zA-Z0-9_-]{3,32})(\/clicks)?$/);
       if (urlMatch) {
         const code = decodeURIComponent(urlMatch[1]!);
         const unauthorized = requireApiKey(request, env);
@@ -60,6 +79,10 @@ export default {
           return withCors(unauthorized);
         }
 
+        if (urlMatch[2]) {
+          if (method !== 'GET') return withCors(jsonError('Método não permitido', 405));
+          return withCors(await getClicks(request, env, code));
+        }
         if (method === "GET") {
           return withCors(await getUrl(env, code));
         }
@@ -72,7 +95,7 @@ export default {
       if (method === "GET" && path !== "/") {
         const code = decodeURIComponent(path.slice(1));
         if (!code.includes("/")) {
-          return await redirect(env, code, ctx);
+          return await redirect(request, env, code, ctx);
         }
       }
 
@@ -85,6 +108,7 @@ export default {
               "GET /{code}": "Redireciona (público) + clique atômico (Durable Object)",
               "GET /urls": "Lista links + cliques exatos (X-API-Key)",
               "GET /urls/{code}": "Detalhes + cliques exatos (X-API-Key)",
+              "GET /urls/{code}/clicks": "Auditoria paginada: limit, cursor, from, until (X-API-Key)",
               "DELETE /urls/{code}": "Remove link e contador (X-API-Key)",
               "GET /health": "Health check",
             },

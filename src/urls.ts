@@ -1,6 +1,7 @@
 import type { Env, ShortenRequest, UrlRecord, UrlRecordStored } from "./types";
 import { json, jsonError } from "./auth";
 import { log } from "./log";
+import { collectAudit, parseAuditQuery } from "./audit";
 
 const CODE_ALPHABET =
   "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -100,7 +101,7 @@ export function validateHttpUrl(raw: string): URL | null {
   if (raw.trim().length > MAX_URL_LENGTH) {
     return null;
   }
-  if (!parsed.hostname) {
+  if (!parsed.hostname || parsed.username || parsed.password) {
     return null;
   }
   return parsed;
@@ -146,16 +147,36 @@ async function allocateCode(env: Env, preferred?: string): Promise<string | Resp
 export async function createShortUrl(
   request: Request,
   env: Env,
+  publicRequest = false,
 ): Promise<Response> {
   let body: ShortenRequest;
   try {
-    body = (await request.json()) as ShortenRequest;
+    const reader = request.body?.getReader();
+    if (!reader) return jsonError("JSON inválido", 400);
+    const decoder = new TextDecoder();
+    let size = 0;
+    let text = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > 16384) {
+        await reader.cancel();
+        return jsonError("Solicitação muito grande", 413);
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+    body = JSON.parse(text + decoder.decode()) as ShortenRequest;
   } catch {
     return jsonError("JSON inválido", 400);
   }
 
   if (!body || typeof body.url !== "string") {
     return jsonError("Campo 'url' é obrigatório", 400);
+  }
+
+  if (publicRequest && body.code !== undefined) {
+    return jsonError("Códigos personalizados exigem acesso autenticado", 400);
   }
 
   const parsed = validateHttpUrl(body.url);
@@ -198,6 +219,24 @@ export async function createShortUrl(
     },
     201,
   );
+}
+
+export async function createPublicShortUrl(request: Request, env: Env): Promise<Response> {
+  if (request.headers.get("Origin") !== new URL(request.url).origin) {
+    return jsonError("Origem não permitida", 403);
+  }
+  if (request.headers.get("Content-Type")?.split(";")[0]?.trim().toLowerCase() !== "application/json") {
+    return jsonError("Envie uma solicitação JSON", 415);
+  }
+  const ip = request.headers.get("CF-Connecting-IP");
+  if (!ip) return jsonError("Não foi possível verificar a conexão. Tente novamente.", 503);
+  const { success } = await env.PUBLIC_RATE_LIMIT.limit({ key: `encurtador:public:${ip}` });
+  if (!success) {
+    const response = jsonError("Você chegou ao limite de solicitações. Aguarde um minuto e tente novamente.", 429);
+    response.headers.set("Retry-After", "60");
+    return response;
+  }
+  return createShortUrl(request, env, true);
 }
 
 export async function listUrls(env: Env): Promise<Response> {
@@ -271,6 +310,7 @@ export async function deleteUrl(env: Env, code: string): Promise<Response> {
 }
 
 export async function redirect(
+  request: Request,
   env: Env,
   code: string,
   ctx: ExecutionContext,
@@ -289,7 +329,7 @@ export async function redirect(
 
   ctx.waitUntil(
     clickStub(env, code)
-      .increment()
+      .increment(collectAudit(request, code, record.url), record.clicks)
       .then((clicks) => {
         log.info("click.incremented", { code, clicks });
       })
@@ -307,4 +347,11 @@ export async function redirect(
       "Cache-Control": "no-store",
     },
   });
+}
+
+export async function getClicks(request: Request, env: Env, code: string): Promise<Response> {
+  const query = parseAuditQuery(new URL(request.url).searchParams);
+  if (!query) return jsonError('Consulta inválida: limit 1-100, cursor numérico e datas UTC ISO 8601 (from <= until)', 400);
+  if (await env.URLS.get(code) === null) return jsonError('Link não encontrado', 404);
+  return json(await clickStub(env, code).listEvents(query));
 }

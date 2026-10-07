@@ -1,10 +1,13 @@
 import type { ClickCounter } from "./click-counter";
 
 export interface Env {
+  ASSETS: Fetcher;
+  PUBLIC_RATE_LIMIT: RateLimit;
   URLS: KVNamespace;
   CLICK_COUNTER: DurableObjectNamespace<ClickCounter>;
   API_KEY: string;
   PUBLIC_BASE_URL?: string;
+  AUDIT_RETENTION_MONTHS?: string;
 }
 
 /** Metadados no KV (cliques vivem no Durable Object). */

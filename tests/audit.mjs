@@ -1,0 +1,168 @@
+import assert from 'node:assert/strict';
+import { build } from 'esbuild';
+import { Miniflare, Log, LogLevel, convertV4MiniflareOptions } from 'miniflare';
+const auditBuild = await build({ entryPoints: ['src/audit.ts'], bundle: true, write: false, format: 'esm', platform: 'node' });
+const { collectAudit, auditExpiresAt, parseAuditQuery } = await import(`data:text/javascript;base64,${Buffer.from(auditBuild.outputFiles[0].text).toString('base64')}`);
+
+const { outputFiles } = await build({ stdin: { contents: "import handler from './src/index.ts'; import { ClickCounter as Counter } from './src/click-counter.ts'; export default handler; export class ClickCounter extends Counter { async triggerAlarm() { await this.alarm(); } async alarmTime() { return this.ctx.storage.getAlarm(); } async scheduleAlarm(time) { await this.ctx.storage.setAlarm(time); } async setRetention(months) { this.env.AUDIT_RETENTION_MONTHS = months; } }", resolveDir: process.cwd(), sourcefile: 'audit-test.ts' }, bundle: true, write: false, format: 'esm', platform: 'browser', external: ['cloudflare:workers'] });
+const options = convertV4MiniflareOptions({ workers: [{ name: 'audit-test', modules: true, script: outputFiles[0].text, compatibilityDate: '2025-09-25', kvNamespaces: ['URLS'], durableObjects: { CLICK_COUNTER: { className: 'ClickCounter', useSQLite: true } }, bindings: { API_KEY: 'test-key', AUDIT_RETENTION_MONTHS: '12' } }], unsafeInspectDurableObjects: true, cf: { country: 'BR', city: 'Recife', region: 'Pernambuco', latitude: '-8.05', longitude: '-34.9', timezone: 'America/Recife', asn: 1234, asOrganization: 'Test Network', tlsVersion: 'TLSv1.3', httpProtocol: 'HTTP/2', colo: 'REC', botManagement: { score: 25, verifiedBot: false, ja4: 'test-ja4' } }, log: new Log(LogLevel.ERROR) });
+options.workers[0].config.assets = { directory: "web/out", hasUserWorker: true, htmlHandling: "none", notFoundHandling: "none", runWorkerFirst: ["/*", "!/_next/*", "!/favicon.svg"] };
+options.workers[0].config.env.ASSETS = { type: "assets" };
+options.workers[0].config.env.PUBLIC_RATE_LIMIT = { type: 'rate-limit', namespace: '1007102026', simple: { limit: 5, period: 60 } };
+const mf = new Miniflare(options);
+const headers = { 'X-API-Key': 'test-key' };
+const request = (path, init = {}) => mf.dispatchFetch(`https://short.test${path}`, { redirect: 'manual', ...init });
+const query = async (path) => {
+  const response = await request(path, { headers });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('Cache-Control'), 'no-store');
+  return response.json();
+};
+
+try {
+  const publicPost = (body, ip = '203.0.113.100') => request('/public/shorten', { method: 'POST', headers: { Origin: 'https://short.test', 'Content-Type': 'application/json', 'CF-Connecting-IP': ip }, body: JSON.stringify(body) });
+  const publicCreated = await publicPost({ url: 'https://example.com/public?campaign=test#section' });
+  assert.equal(publicCreated.status, 201);
+  const publicLink = await publicCreated.json();
+  assert.match(publicLink.short_url, /^https:\/\/short\.test\/[a-zA-Z0-9]{7}$/);
+  const publicRedirect = await request(new URL(publicLink.short_url).pathname);
+  assert.equal(publicRedirect.status, 302);
+  assert.equal(publicRedirect.headers.get('Location'), 'https://example.com/public?campaign=test#section');
+  for (let i = 0; i < 4; i++) assert.equal((await publicPost({ url: 'https://example.com/public' })).status, 201);
+  const limited = await publicPost({ url: 'https://example.com/public' });
+  assert.equal(limited.status, 429);
+  assert.equal(limited.headers.get('Retry-After'), '60');
+  assert.equal((await request('/public/shorten', { method: 'POST', headers: { Origin: 'https://short.test', 'Content-Type': 'application/json', 'CF-Connecting-IP': '203.0.113.100', 'CF-Connecting-IPv6': '2001:db8::999' }, body: JSON.stringify({ url: 'https://example.com' }) })).status, 429);
+  for (const [index, body] of [{ url: 'javascript:alert(1)' }, { url: 'https://user:password@example.com' }, { url: 'https://example.com', code: 'custom' }, { url: 'https://example.com/' + 'a'.repeat(2048) }, {}].entries()) {
+    assert.equal((await publicPost(body, `203.0.113.${110 + index}`)).status, 400);
+  }
+  assert.equal((await request('/public/shorten', { method: 'POST', headers: { Origin: 'https://evil.test', 'Content-Type': 'application/json' }, body: JSON.stringify({ url: 'https://example.com' }) })).status, 403);
+  assert.equal((await request('/public/shorten', { method: 'POST', headers: { Origin: 'https://short.test', 'Content-Type': 'text/plain' }, body: 'https://example.com' })).status, 415);
+  assert.equal((await request('/public/shorten', { method: 'POST', headers: { Origin: 'https://short.test', 'Content-Type': 'application/json', 'CF-Connecting-IP': '203.0.113.250' }, body: ' '.repeat(16385) })).status, 413);
+  assert.equal((await request('/shorten', { method: 'POST', body: JSON.stringify({ url: 'https://example.com' }) })).status, 401);
+  assert.equal((await request('/shorten', { method: 'POST', headers, body: ' '.repeat(16385) })).status, 413);
+  const homepage = await request('/');
+  assert.equal(homepage.status, 200, await homepage.clone().text());
+  assert.match(homepage.headers.get('Content-Type'), /text\/html/);
+  const html = await homepage.text();
+  assert.match(html, /Links curtos/);
+  assert.match(html, /Link para encurtar/);
+  assert.equal(html.includes('X-API-Key'), false);
+  assert.equal(homepage.headers.get('X-Content-Type-Options'), 'nosniff');
+  assert.equal(homepage.headers.get('X-Frame-Options'), 'DENY');
+  assert.equal((await request('/', { method: 'HEAD' })).status, 200);
+  assert.equal(await (await request('/', { method: 'HEAD' })).text(), '');
+  const catalog = await request('/', { headers: { Accept: 'application/json' } });
+  assert.equal(catalog.status, 200);
+  assert.ok((await catalog.json()).endpoints['GET /urls/{code}/clicks']);
+  const cssPath = html.match(/href="([^\"]+\.css[^\"]*)"/)[1];
+  const css = await request(cssPath);
+  assert.equal(css.status, 200);
+  assert.match(css.headers.get('Content-Type'), /text\/css/);
+  assert.equal((await request('/favicon.svg')).status, 200);
+  assert.equal((await request('/_next/missing.js')).status, 404);
+  assert.equal((await request('/missing')).status, 404);
+  assert.equal((await request('/shorten', { method: 'POST', headers, body: JSON.stringify({ code: 'audit', url: 'https://example.com/path?token=secret#private' }) })).status, 201);
+  assert.equal((await request('/urls/audit/clicks')).status, 401);
+  const response = await request('/audit?utm_source=newsletter&token=secret', { headers: { 'CF-Connecting-IP': '203.0.113.42', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/130.0.0.0 Safari/537.36', 'Accept-Language': 'pt-BR,pt;q=0.9', Referer: 'https://origin.test/private?token=secret', Cookie: 'session=secret', Authorization: 'Bearer secret' } });
+  assert.equal(response.status, 302);
+  assert.equal(response.headers.get('Location'), 'https://example.com/path?token=secret#private');
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const first = await query('/urls/audit/clicks');
+  assert.equal(first.items.length, 1);
+  const event = first.items[0];
+  assert.equal(event.code, 'audit');
+  assert.equal(event.destination, 'https://example.com/path');
+  assert.equal(event.ip, '203.0.113.42');
+  assert.equal(event.referrer, 'https://origin.test');
+  assert.equal(event.campaign.utm_source, 'newsletter');
+  assert.equal(event.cloudflare.country, 'BR');
+  assert.equal(event.cloudflare.botManagement.ja4, 'test-ja4');
+  assert.equal(event.browser, 'Chrome');
+  assert.equal(event.os, 'Windows');
+  assert.equal(event.device, 'desktop');
+  assert.equal(JSON.stringify(first).includes('secret'), false);
+  assert.ok(Date.parse(event.expires_at) > Date.now() + 360 * 86400000);
+  assert.equal((await query('/urls/audit')).clicks, 1);
+  await Promise.all(Array.from({ length: 12 }, () => request('/audit')));
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal((await query('/urls/audit')).clicks, 13);
+  const page = await query('/urls/audit/clicks?limit=5');
+  assert.equal(page.items.length, 5);
+  assert.ok(page.next_cursor);
+  const next = await query(`/urls/audit/clicks?limit=5&cursor=${page.next_cursor}`);
+  assert.equal(next.items.length, 5);
+  assert.equal(next.items.some(item => page.items.some(previous => previous.id === item.id)), false);
+  assert.equal((await query('/urls/audit/clicks?from=2000-01-01T00:00:00Z&until=2001-01-01T00:00:00Z')).items.length, 0);
+  for (const params of ['limit=0', 'limit=101', 'cursor=abc', 'from=invalid', 'from=2026-02-30T00:00:00Z', 'from=2027-01-01T00:00:00Z&until=2026-01-01T00:00:00Z']) {
+    assert.equal((await request(`/urls/audit/clicks?${params}`, { headers })).status, 400, params);
+  }
+  assert.equal((await request('/urls/missing/clicks', { headers })).status, 404);
+  assert.equal((await request('/urls/audit/clicks', { method: 'DELETE', headers })).status, 405);
+  const storage = await mf.unsafeGetDurableObjectStorage('audit-test', 'ClickCounter', { name: 'audit' });
+  await storage.exec('UPDATE audit_events SET expires_at = 0');
+  assert.equal((await query('/urls/audit/clicks')).items.length, 0);
+  await storage.exec("INSERT INTO audit_events (created_at, expires_at, metadata) VALUES (0, 0, '{}')");
+  const namespace = await mf.getDurableObjectNamespace('CLICK_COUNTER');
+  await namespace.get(namespace.idFromName('audit')).triggerAlarm();
+  assert.equal((await storage.exec('SELECT COUNT(*) AS count FROM audit_events'))[0].count, 0);
+  await storage.exec("WITH RECURSIVE numbers(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM numbers WHERE x<1005) INSERT INTO audit_events (created_at, expires_at, metadata) SELECT 0, 0, '{}' FROM numbers");
+  await namespace.get(namespace.idFromName('audit')).triggerAlarm();
+  assert.equal((await storage.exec('SELECT COUNT(*) AS count FROM audit_events'))[0].count, 5);
+  await namespace.get(namespace.idFromName('audit')).triggerAlarm();
+  assert.equal((await storage.exec('SELECT COUNT(*) AS count FROM audit_events'))[0].count, 0);
+  assert.equal((await query('/urls/audit')).clicks, 13);
+  await request('/audit');
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal((await query('/urls/audit/clicks')).items.length, 1);
+  await storage.exec("CREATE TRIGGER fail_audit BEFORE INSERT ON audit_events BEGIN SELECT RAISE(ABORT, 'test storage failure'); END");
+  assert.equal((await request('/audit')).status, 302);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal((await query('/urls/audit')).clicks, 14);
+  assert.equal((await query('/urls/audit/clicks')).items.length, 1);
+  await storage.exec('DROP TRIGGER fail_audit');
+  const stub = namespace.get(namespace.idFromName('audit'));
+  await stub.scheduleAlarm(Date.now() + 370 * 86400000);
+  const oldAlarm = await stub.alarmTime();
+  await stub.setRetention('1');
+  await request('/audit');
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const shortRetention = await query('/urls/audit/clicks');
+  const newExpiry = Date.parse(shortRetention.items[0].expires_at);
+  assert.ok(newExpiry < oldAlarm);
+  assert.equal(await stub.alarmTime(), newExpiry);
+  assert.equal((await request('/urls/audit', { method: 'DELETE', headers })).status, 200);
+  assert.equal((await request('/urls/audit/clicks', { headers })).status, 404);
+  assert.equal((await storage.exec('SELECT COUNT(*) AS count FROM audit_events'))[0].count, 0);
+  assert.equal(await stub.getCount(), 0);
+  assert.equal(await stub.alarmTime(), null);
+  assert.equal((await request('/shorten', { method: 'POST', headers, body: JSON.stringify({ code: 'audit', url: 'https://example.com/new' }) })).status, 201);
+  await request('/audit');
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal((await query('/urls/audit/clicks')).items.length, 1);
+  assert.equal((await query('/urls/audit')).clicks, 1);
+  const kv = await mf.getKVNamespace('URLS');
+  await kv.put('legacy', JSON.stringify({ url: 'https://example.com', created_at: '2020-01-01T00:00:00Z', clicks: 27 }));
+  await request('/legacy');
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal((await query('/urls/legacy')).clicks, 28);
+  assert.equal((await query('/urls/legacy/clicks')).items.length, 1);
+  assert.equal(new Date(auditExpiresAt(Date.parse('2024-02-29T12:30:00Z'))).toISOString(), '2025-02-28T12:30:00.000Z');
+  assert.equal(new Date(auditExpiresAt(Date.parse('2026-01-31T12:30:00Z'), '1')).toISOString(), '2026-02-28T12:30:00.000Z');
+  assert.throws(() => auditExpiresAt(Date.now(), '0'));
+  assert.equal(parseAuditQuery(new URLSearchParams('from=2026-01-01T00:00:00.123Z')).from, 1767225600123);
+  assert.equal(collectAudit(new Request('https://short.test/audit', { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0' } }), 'audit', 'https://example.com').browser, 'Edge');
+  const oversized = collectAudit(new Request('https://short.test/audit', { headers: { 'User-Agent': 'a'.repeat(10000), 'Accept-Language': 'b'.repeat(10000) } }), 'audit', 'https://user:password@example.com/path?secret=value#secret');
+  assert.equal(oversized.user_agent.length, 2048);
+  assert.equal(oversized.headers['accept-language'].length, 1024);
+  assert.equal(oversized.destination, 'https://example.com/path');
+  assert.equal(oversized.cloudflare.country, null);
+  console.log('Audit integration checks passed');
+} finally {
+  await mf.dispose();
+}
+
+
+
+
+

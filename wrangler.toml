@@ -2,6 +2,18 @@ name = "encurtador"
 main = "src/index.ts"
 compatibility_date = "2025-09-25"
 
+[assets]
+directory = "./web/out"
+binding = "ASSETS"
+run_worker_first = ["/*", "!/_next/*", "!/favicon.svg"]
+html_handling = "none"
+not_found_handling = "none"
+
+[[ratelimits]]
+name = "PUBLIC_RATE_LIMIT"
+namespace_id = "1007102026"
+simple = { limit = 5, period = 60 }
+
 [[kv_namespaces]]
 binding = "URLS"
 id = "a37a1ce3b3d94545a21e18f80ba105f2"
@@ -18,9 +30,11 @@ new_sqlite_classes = ["ClickCounter"]
 # Opcional: domínio público usado na resposta de short_url (ex.: https://encurtador.seudominio.dev)
 # Se vazio, usa a URL do próprio Worker (request.url)
 PUBLIC_BASE_URL = ""
+AUDIT_RETENTION_MONTHS = "12"
 
 [observability]
 enabled = true
+redact_query_string = true
 
 [observability.logs]
 invocation_logs = true
