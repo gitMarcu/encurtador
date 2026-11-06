@@ -1,6 +1,10 @@
 name = "encurtador"
 main = "src/index.ts"
 compatibility_date = "2025-09-25"
+# Domínio próprio: o Wrangler cria o DNS e o certificado na zona cuturl.dev (mesma conta)
+routes = [{ pattern = "cuturl.dev", custom_domain = true }]
+# Mantém o *.workers.dev no ar: links curtos antigos foram distribuídos nesse endereço
+workers_dev = true
 
 [assets]
 directory = "./web/out"
@@ -27,9 +31,9 @@ tag = "v1"
 new_sqlite_classes = ["ClickCounter"]
 
 [vars]
-# Opcional: domínio público usado na resposta de short_url (ex.: https://encurtador.seudominio.dev)
+# Domínio público usado na resposta de short_url, mesmo quando o link é criado pelo *.workers.dev
 # Se vazio, usa a URL do próprio Worker (request.url)
-PUBLIC_BASE_URL = ""
+PUBLIC_BASE_URL = "https://cuturl.dev"
 AUDIT_RETENTION_MONTHS = "12"
 
 [observability]

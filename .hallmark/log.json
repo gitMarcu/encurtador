@@ -1,0 +1,30 @@
+[
+ {
+  "mode": "redesign",
+  "depth": "full",
+  "scope": "page",
+  "shape": "Workbench",
+  "theme": "console",
+  "axes": "dark/grotesk-sans/chromatic-amber",
+  "hero": "Banner",
+  "nav": "edge-aligned",
+  "footer": "letter close",
+  "imagery": "none, product output built as samples",
+  "photos": [],
+  "entry": "none",
+  "fingerprint": "workbench/banner/edge/letter/record-first/rows",
+  "sections": [
+   "hero-form",
+   "split-record",
+   "showcase-compare",
+   "rows-calls",
+   "footer"
+  ],
+  "signature": "one access record, field by field, in the measured face",
+  "waived": [
+   "44c"
+  ],
+  "prompt": "URL shortener utility at cuturl.dev with access audit",
+  "date": "2026-11-06"
+ }
+]
