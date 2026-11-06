@@ -2,14 +2,14 @@
 
 Encurtador de URLs com API autenticada, redirecionamento público e auditoria de acessos. O mesmo Cloudflare Worker serve a apresentação gerada pelo Next.js e executa a API em TypeScript.
 
-Apresentação: [encurtador.marcosmeireles359.workers.dev](https://encurtador.marcosmeireles359.workers.dev).
+Apresentação: [cuturl.dev](https://cuturl.dev).
 
 ## Stack e arquitetura
 
 | Camada | Tecnologia | Responsabilidade |
 | --- | --- | --- |
 | Apresentação | Next.js App Router, React, TypeScript | Geração estática da página pública |
-| Estilos | Tailwind CSS 4, shadcn/ui e Radix | Tokens e componentes locais acessíveis |
+| Estilos | CSS com tokens (`web/app/tokens.css`, `base.css`), Radix Slot e cva | Tema, estados dos controles e componentes locais acessíveis |
 | HTTP | Cloudflare Workers | Rotas, autenticação, redirecionamento e assets |
 | Criação pública | Rate Limiting binding | 5 solicitações por minuto por IP em cada localidade |
 | Links | Cloudflare KV | Destino, data de criação e contador legado |
@@ -100,7 +100,7 @@ X-API-Key: <sua-chave>
 ```json
 {
   "code": "minha-ideia",
-  "short_url": "https://encurtador.marcosmeireles359.workers.dev/minha-ideia",
+  "short_url": "https://cuturl.dev/minha-ideia",
   "url": "https://exemplo.com.br/conteudo",
   "created_at": "2026-10-07T12:00:00-03:00",
   "clicks": 0
@@ -178,7 +178,7 @@ npm exec wrangler secret put API_KEY
 npm run deploy
 ```
 
-`deploy` primeiro gera o frontend e então publica Worker e assets juntos. Em uma instalação existente, mantenha os bindings e secrets já configurados. A coleta começa com novos acessos após a publicação; não há metadados retroativos dos cliques antigos. Contagens legadas são preservadas.
+`deploy` primeiro gera o frontend e então publica Worker e assets juntos. O Worker atende apenas o domínio próprio `cuturl.dev` (`routes` com `custom_domain` em `wrangler.toml`); o `*.workers.dev` e as Preview URLs ficam desligados. O Wrangler cria o DNS e o certificado, desde que a zona esteja na mesma conta Cloudflare. Em uma instalação existente, mantenha os bindings e secrets já configurados. A coleta começa com novos acessos após a publicação; não há metadados retroativos dos cliques antigos. Contagens legadas são preservadas.
 
 ## Segurança e limites operacionais
 
